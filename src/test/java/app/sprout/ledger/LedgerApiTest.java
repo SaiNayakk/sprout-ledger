@@ -12,7 +12,9 @@ import app.sprout.contracts.Contracts;
 import com.atlassian.oai.validator.OpenApiInteractionValidator;
 import com.atlassian.oai.validator.report.LevelResolver;
 import com.atlassian.oai.validator.report.ValidationReport;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -24,6 +26,9 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.context.TestConfiguration;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Primary;
 import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.test.context.DynamicPropertyRegistry;
@@ -61,6 +66,16 @@ class LedgerApiTest {
     @Autowired MockMvc mvc;
     @Autowired ObjectMapper json;
     @Autowired JdbcClient db;
+    @Autowired MutableClock clock;
+
+    @TestConfiguration
+    static class TestClock {
+        @Bean
+        @Primary
+        MutableClock testClock() {
+            return new MutableClock(Instant.parse("2026-11-01T04:00:00Z"));
+        }
+    }
 
     static String cash(UUID user) {
         return "customer:" + user + ":cash";
@@ -130,6 +145,37 @@ class LedgerApiTest {
         mvc.perform(get("/v1/accounts/customer:" + user + ":dues")).andExpect(jsonPath("$.kind").value("ASSET"));
         mvc.perform(get("/v1/accounts/customer:" + user + ":unsettled")).andExpect(jsonPath("$.kind").value("LIABILITY"));
         mvc.perform(get("/v1/accounts/sprout:payable:income-tax")).andExpect(status().isUnprocessableEntity());
+    }
+
+    @Test
+    void aStatementHasTheOpeningBalanceAndTheBalanceAfterEveryLine() throws Exception {
+        UUID user = UUID.randomUUID();
+        String held = "customer:" + user + ":order-hold";
+        clock.set(Instant.parse("2026-11-02T06:00:00Z"));          // 2 Nov, India
+        deposit(user, "10000");
+        clock.set(Instant.parse("2026-11-03T06:00:00Z"));          // 3 Nov
+        postEntry(entry("order-hold:" + UUID.randomUUID(), cash(user), "DEBIT", "2500.50", held, "CREDIT", "2500.50")).andExpect(status().isCreated());
+        clock.set(Instant.parse("2026-11-03T19:00:00Z"));          // 4 Nov 00:30 in India: the next day there
+        postEntry(entry("release:" + UUID.randomUUID(), held, "DEBIT", "500.50", cash(user), "CREDIT", "500.50")).andExpect(status().isCreated());
+        JsonNode st = json.readTree(mvc.perform(get("/v1/accounts/" + cash(user) + "/statement").param("from", "2026-11-03").param("to", "2026-11-05"))
+                .andExpect(status().isOk()).andExpect(MATCHES_CONTRACT).andReturn().getResponse().getContentAsString());
+        assertThat(st.path("openingBalance").asText()).isEqualTo("10000.00");
+        assertThat(st.path("lines").size()).isEqualTo(2);
+        assertThat(st.path("lines").get(0).path("side").asText()).isEqualTo("DEBIT");
+        assertThat(st.path("lines").get(0).path("balanceAfter").asText()).isEqualTo("7499.50");
+        assertThat(st.path("lines").get(1).path("balanceAfter").asText()).isEqualTo("8000.00");
+        assertThat(st.path("closingBalance").asText()).isEqualTo("8000.00");
+        assertThat(st.path("complete").asBoolean()).isTrue();
+        JsonNode only3rd = json.readTree(mvc.perform(get("/v1/accounts/" + cash(user) + "/statement").param("from", "2026-11-03").param("to", "2026-11-04"))
+                .andReturn().getResponse().getContentAsString());
+        assertThat(only3rd.path("lines").size()).as("India's 4 Nov starts at 18:30 UTC").isEqualTo(1);
+        mvc.perform(get("/v1/accounts/" + cash(user) + "/statement").param("from", "2026-11-05").param("to", "2026-11-03"))
+                .andExpect(status().isBadRequest());
+        // balances by pattern: every customer's held money
+        JsonNode holds = json.readTree(mvc.perform(get("/v1/balances").param("pattern", "customer:*:order-hold")).andExpect(status().isOk())
+                .andExpect(MATCHES_CONTRACT).andReturn().getResponse().getContentAsString()).path("balances");
+        assertThat(holds.findValuesAsText("account")).contains(held).allMatch(a -> a.endsWith(":order-hold"));
+        mvc.perform(get("/v1/balances").param("pattern", "drop table;")).andExpect(status().isBadRequest());
     }
 
     @Test

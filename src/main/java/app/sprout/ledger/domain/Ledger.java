@@ -5,6 +5,7 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Clock;
 import java.time.Instant;
+import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.HexFormat;
 import java.util.List;
@@ -43,6 +44,16 @@ public class Ledger {
     public record AccountType(Kind kind, boolean allowNegative) {}
 
     public record TrialBalance(long assets, long liabilities, int accounts) {}
+
+    public record Line(UUID entryId, Instant postedAt, String description, String reference, Side side, long paise, long balanceAfter) {}
+
+    /** An account's movements over a period, with the balances either side. {@code complete} is false if lines were cut off. */
+    public record Statement(String account, LocalDate from, LocalDate to, long opening, long closing, List<Line> lines, boolean complete) {}
+
+    public record AccountBalance(String account, Kind kind, long balance) {}
+
+    static final java.time.ZoneId IST = java.time.ZoneId.of("Asia/Kolkata");
+    static final int MAX_LINES = 1000;
 
     private static final String CUSTOMER = "^customer:[0-9a-f-]{36}:";
 
@@ -203,6 +214,47 @@ public class Ledger {
         List<Entry> out = new ArrayList<>();
         ids.forEach(id -> out.add(entry(id)));
         return out;
+    }
+
+    /**
+     * The account's postings from {@code from} (inclusive) to {@code to} (exclusive), India time, oldest
+     * first, each with the balance after it; the opening balance is everything before {@code from}.
+     */
+    public Statement statement(String account, LocalDate from, LocalDate to) {
+        AccountType type = typeOf(account);
+        if (!from.isBefore(to)) {
+            throw new ApiException(ErrorCode.VALIDATION_FAILED, "from must be before to.");
+        }
+        java.sql.Timestamp start = java.sql.Timestamp.from(from.atStartOfDay(IST).toInstant());
+        java.sql.Timestamp end = java.sql.Timestamp.from(to.atStartOfDay(IST).toInstant());
+        // positive when the posting increases the account (a debit to an asset, a credit to a liability)
+        String signed = type.kind() == Kind.ASSET ? "CASE p.side WHEN 'DEBIT' THEN p.amount_paise ELSE -p.amount_paise END"
+                : "CASE p.side WHEN 'CREDIT' THEN p.amount_paise ELSE -p.amount_paise END";
+        long opening = db.sql("SELECT COALESCE(SUM(" + signed + "), 0) FROM postings p JOIN journal_entries e ON e.id = p.entry_id "
+                        + "WHERE p.account = ? AND e.posted_at < ?")
+                .params(account, start).query(Long.class).single();
+        List<Line> lines = db.sql("SELECT e.id, e.posted_at, e.description, e.reference, p.side, p.amount_paise, "
+                        + "SUM(" + signed + ") OVER (ORDER BY e.posted_at, e.id, p.seq) AS moved "
+                        + "FROM postings p JOIN journal_entries e ON e.id = p.entry_id "
+                        + "WHERE p.account = ? AND e.posted_at >= ? AND e.posted_at < ? ORDER BY e.posted_at, e.id, p.seq LIMIT ?")
+                .params(account, start, end, MAX_LINES + 1)
+                .query((rs, n) -> new Line(rs.getObject(1, UUID.class), rs.getTimestamp(2).toInstant(), rs.getString(3), rs.getString(4),
+                        Side.valueOf(rs.getString(5)), rs.getLong(6), opening + rs.getLong(7)))
+                .list();
+        boolean complete = lines.size() <= MAX_LINES;
+        List<Line> shown = complete ? lines : lines.subList(0, MAX_LINES);
+        long closing = shown.isEmpty() ? opening : shown.get(shown.size() - 1).balanceAfter();
+        return new Statement(account, from, to, opening, closing, shown, complete);
+    }
+
+    /** Every account matching a pattern where {@code *} stands for one part, e.g. {@code customer:*:order-hold}. */
+    public List<AccountBalance> balances(String pattern) {
+        if (pattern == null || !pattern.matches("[a-z0-9:*-]{1,100}") || pattern.chars().filter(c -> c == '*').count() > 3) {
+            throw new ApiException(ErrorCode.VALIDATION_FAILED, "pattern is an account name with * for one part, e.g. customer:*:order-hold.");
+        }
+        String regex = "^" + pattern.replace("*", "[^:]+") + "$";
+        return db.sql("SELECT name, kind, balance_paise FROM accounts WHERE name ~ ? ORDER BY name").param(regex)
+                .query((rs, n) -> new AccountBalance(rs.getString(1), Kind.valueOf(rs.getString(2)), rs.getLong(3))).list();
     }
 
     public TrialBalance trialBalance() {

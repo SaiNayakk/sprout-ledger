@@ -15,6 +15,10 @@ Sprout's books: the single source of truth for money. Internal only; the gateway
 | `customer:{userId}:withdrawal-hold` | liability: on its way out |
 | `sprout:bank` | asset: client money held at Sprout Bank |
 
+**Statements and reconciliation.** An account's statement between two dates comes with its opening
+balance and the balance after every line (computed from the journal), and every account matching a
+pattern (`customer:*:order-hold`) can be listed with its balance.
+
 ## Part of Sprout
 
 [Sprout](https://sainayakk.github.io/sprout-platform/) is a simulated brokerage built from scratch as
