@@ -109,6 +109,30 @@ class LedgerApiTest {
     }
 
     @Test
+    void aSharePurchaseWithItsChargesIsBookedFromTheOrderHold() throws Exception {
+        UUID user = UUID.randomUUID();
+        String held = "customer:" + user + ":order-hold";
+        deposit(user, "10000");
+        // the order blocks money, then the fill takes the trade value and every charge, and the rest goes back
+        postEntry(entry("order-hold:" + UUID.randomUUID(), cash(user), "DEBIT", "5200", held, "CREDIT", "5200"))
+                .andExpect(status().isCreated());
+        postEntry(entry("fill:" + UUID.randomUUID(), held, "DEBIT", "5200",
+                "sprout:clearing-payable", "CREDIT", "5000",
+                "sprout:payable:stt", "CREDIT", "5",
+                "sprout:payable:stamp-duty", "CREDIT", "0.75",
+                "sprout:payable:exchange-charges", "CREDIT", "0.15",
+                "sprout:payable:sebi-fees", "CREDIT", "0.01",
+                "sprout:payable:gst", "CREDIT", "0.03",
+                "sprout:income:brokerage", "CREDIT", "1",
+                cash(user), "CREDIT", "193.06")).andExpect(status().isCreated()).andExpect(MATCHES_CONTRACT);
+        assertThat(balance(cash(user))).isEqualTo("4993.06");
+        assertThat(balance(held)).isEqualTo("0.00");
+        mvc.perform(get("/v1/accounts/customer:" + user + ":dues")).andExpect(jsonPath("$.kind").value("ASSET"));
+        mvc.perform(get("/v1/accounts/customer:" + user + ":unsettled")).andExpect(jsonPath("$.kind").value("LIABILITY"));
+        mvc.perform(get("/v1/accounts/sprout:payable:income-tax")).andExpect(status().isUnprocessableEntity());
+    }
+
+    @Test
     void theSameKeyTwiceIsOneEntryAndADifferentEntryUnderItIsRefused() throws Exception {
         UUID user = UUID.randomUUID();
         String key = "deposit:" + UUID.randomUUID();

@@ -44,10 +44,28 @@ public class Ledger {
 
     public record TrialBalance(long assets, long liabilities, int accounts) {}
 
-    private static final Map<Pattern, AccountType> KINDS = Map.of(
-            Pattern.compile("^customer:[0-9a-f-]{36}:cash$"), new AccountType(Kind.LIABILITY, false),
-            Pattern.compile("^customer:[0-9a-f-]{36}:withdrawal-hold$"), new AccountType(Kind.LIABILITY, false),
-            Pattern.compile("^sprout:bank$"), new AccountType(Kind.ASSET, false));
+    private static final String CUSTOMER = "^customer:[0-9a-f-]{36}:";
+
+    /**
+     * Every kind of account the books know. "Liability" here covers everything on the right-hand
+     * side of the balance sheet, Sprout's own income included, so the books balance as assets =
+     * liabilities.
+     */
+    private static final Map<Pattern, AccountType> KINDS = Map.ofEntries(
+            // what Sprout owes each customer
+            Map.entry(Pattern.compile(CUSTOMER + "cash$"), new AccountType(Kind.LIABILITY, false)),
+            Map.entry(Pattern.compile(CUSTOMER + "withdrawal-hold$"), new AccountType(Kind.LIABILITY, false)),
+            Map.entry(Pattern.compile(CUSTOMER + "order-hold$"), new AccountType(Kind.LIABILITY, false)),
+            Map.entry(Pattern.compile(CUSTOMER + "unsettled$"), new AccountType(Kind.LIABILITY, false)),
+            // what a customer owes Sprout (an intraday loss bigger than their money)
+            Map.entry(Pattern.compile(CUSTOMER + "dues$"), new AccountType(Kind.ASSET, false)),
+            // Sprout's own
+            Map.entry(Pattern.compile("^sprout:bank$"), new AccountType(Kind.ASSET, false)),
+            Map.entry(Pattern.compile("^sprout:clearing-receivable$"), new AccountType(Kind.ASSET, false)),
+            Map.entry(Pattern.compile("^sprout:clearing-payable$"), new AccountType(Kind.LIABILITY, false)),
+            Map.entry(Pattern.compile("^sprout:income:brokerage$"), new AccountType(Kind.LIABILITY, false)),
+            Map.entry(Pattern.compile("^sprout:payable:(stt|stamp-duty|exchange-charges|sebi-fees|gst)$"),
+                    new AccountType(Kind.LIABILITY, false)));
 
     private final JdbcClient db;
     private final TransactionTemplate tx;
