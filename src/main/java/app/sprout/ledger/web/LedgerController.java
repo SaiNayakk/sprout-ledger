@@ -12,6 +12,8 @@ import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Size;
+import java.time.LocalDate;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import org.springframework.http.HttpStatus;
@@ -64,6 +66,38 @@ public class LedgerController {
             throw new ApiException(ErrorCode.VALIDATION_FAILED, "limit must be between 1 and 200.");
         }
         return Map.of("entries", ledger.entries(account, n).stream().map(LedgerController::dto).toList());
+    }
+
+    @GetMapping("/v1/accounts/{account}/statement")
+    public Map<String, Object> statement(@PathVariable String account, @RequestParam LocalDate from, @RequestParam LocalDate to) {
+        Ledger.Statement s = ledger.statement(account, from, to);
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("account", s.account());
+        m.put("from", s.from().toString());
+        m.put("to", s.to().toString());
+        m.put("openingBalance", Money.rupees(s.opening()));
+        m.put("closingBalance", Money.rupees(s.closing()));
+        m.put("complete", s.complete());
+        m.put("lines", s.lines().stream().map(l -> {
+            Map<String, Object> line = new LinkedHashMap<>();
+            line.put("entryId", l.entryId().toString());
+            line.put("postedAt", l.postedAt().toString());
+            line.put("description", l.description());
+            if (l.reference() != null) {
+                line.put("reference", l.reference());
+            }
+            line.put("side", l.side().name());
+            line.put("amount", Money.rupees(l.paise()));
+            line.put("balanceAfter", Money.rupees(l.balanceAfter()));
+            return line;
+        }).toList());
+        return m;
+    }
+
+    @GetMapping("/v1/balances")
+    public Map<String, Object> balances(@RequestParam String pattern) {
+        return Map.of("balances", ledger.balances(pattern).stream()
+                .map(b -> Map.of("account", b.account(), "kind", b.kind().name(), "balance", Money.rupees(b.balance()))).toList());
     }
 
     @GetMapping("/v1/trial-balance")
